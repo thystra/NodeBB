@@ -8,6 +8,8 @@ const db = require('../mocks/databasemock');
 const user = require('../../src/user');
 const utils = require('../../src/utils');
 const activitypub = require('../../src/activitypub');
+const request = require('../../src/request');
+const meta = require('../../src/meta');
 
 describe('http signature signing and verification', () => {
 	describe('.sign()', () => {
@@ -79,6 +81,83 @@ describe('http signature signing and verification', () => {
 
 			assert(signature);
 			assert.strictEqual(keyId, `keyId="${nconf.get('url')}/actor#key"`);
+		});
+	});
+
+	describe('outgoing GET signing', () => {
+		let originalGet;
+		let originalIsAllowed;
+		let originalActivityPubEnabled;
+		let uid;
+
+		before(async () => {
+			uid = await user.create({ username: utils.generateUUID().slice(0, 10) });
+			originalActivityPubEnabled = meta.config.activitypubEnabled;
+			meta.config.activitypubEnabled = 1;
+		});
+
+		after(() => {
+			if (originalActivityPubEnabled === undefined) {
+				delete meta.config.activitypubEnabled;
+			} else {
+				meta.config.activitypubEnabled = originalActivityPubEnabled;
+			}
+		});
+
+		beforeEach(() => {
+			originalGet = request.get;
+			originalIsAllowed = activitypub.instances.isAllowed;
+			activitypub.instances.isAllowed = async () => ({ allowed: true });
+		});
+
+		afterEach(() => {
+			request.get = originalGet;
+			activitypub.instances.isAllowed = originalIsAllowed;
+		});
+
+		const captureHeaders = async (type, id) => {
+			const uri = `https://example.org/${utils.generateUUID()}`;
+			let capturedHeaders;
+
+			request.get = async (requestedUri, options) => {
+				assert.strictEqual(requestedUri, uri);
+				capturedHeaders = options.headers;
+
+				return {
+					response: { statusCode: 200 },
+					body: { id: uri, type: 'Note' },
+				};
+			};
+
+			await activitypub.get(type, id, uri, { cache: false });
+			return capturedHeaders;
+		};
+
+		it('should sign application-context uid 0 GETs with the application actor key', async () => {
+			const headers = await captureHeaders('uid', 0);
+
+			assert(headers.date);
+			assert(headers.signature);
+			assert(headers.signature.includes(
+				`keyId="${nconf.get('url')}/actor#key"`
+			));
+		});
+
+		it('should continue signing positive user-context GETs with the user key', async () => {
+			const headers = await captureHeaders('uid', uid);
+
+			assert(headers.date);
+			assert(headers.signature);
+			assert(headers.signature.includes(
+				`keyId="${nconf.get('url')}/uid/${uid}#key"`
+			));
+		});
+
+		it('should leave negative contexts unsigned', async () => {
+			const headers = await captureHeaders('uid', -1);
+
+			assert.strictEqual(headers.date, undefined);
+			assert.strictEqual(headers.signature, undefined);
 		});
 	});
 
